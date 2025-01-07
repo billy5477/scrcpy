@@ -1,0 +1,192 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Version name (default is ref name)'
+
+env:
+  # $VERSION is used by release scripts
+  VERSION: ${{ github.event.inputs.name || github.ref_name }}
+
+jobs:
+  test-scrcpy-server:
+    runs-on: ubuntu-22.04
+    env:
+      GRADLE: gradle  # use native gradle instead of ./gradlew in scripts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Test scrcpy-server
+        run: release/test_server.sh
+
+  build-scrcpy-server:
+    runs-on: ubuntu-22.04
+    env:
+      GRADLE: gradle  # use native gradle instead of ./gradlew in scripts
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Build
+        run: release/build_server.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-server
+          path: release/work/build-server/server/scrcpy-server
+
+  test-build-scrcpy-server-without-gradle:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Build without gradle
+        run: server/build_without_gradle.sh
+
+  test-client:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt install -y meson ninja-build nasm ffmpeg libsdl2-2.0-0 \
+             libsdl2-dev libavcodec-dev libavdevice-dev libavformat-dev \
+             libavutil-dev libswresample-dev libusb-1.0-0 libusb-1.0-0-dev \
+             libv4l-dev
+
+      - name: Test
+        run: release/test_client.sh
+
+  build-linux-x86_64:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check architecture
+        run: |
+            arch=$(uname -m)
+            if [[ "$arch" != x86_64 ]]
+            then
+                echo "Unexpected architecture: $arch" >&2
+                exit 1
+            fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt install -y meson ninja-build nasm ffmpeg libsdl2-2.0-0 \
+             libsdl2-dev libavcodec-dev libavdevice-dev libavformat-dev \
+             libavutil-dev libswresample-dev libusb-1.0-0 libusb-1.0-0-dev \
+             libv4l-dev
+
+      - name: Build
+        run: release/build_linux.sh x86_64
+
+      # upload-artifact does not preserve permissions
+      - name: Tar
+        run: |
+            cd release/work/build-linux-x86_64
+            mkdir dist-tar
+            cd dist-tar
+            tar -C .. -cvf dist.tar.gz dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-x86_64-intermediate
+          path: release/work/build-linux-x86_64/dist-tar/
+
+  package-linux-x86_64:
+    needs:
+      - build-scrcpy-server
+      - build-linux-x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download scrcpy-server
+        uses: actions/download-artifact@v4
+        with:
+          name: scrcpy-server
+          path: release/work/build-server/server/
+
+      - name: Download build-linux-x86_64
+        uses: actions/download-artifact@v4
+        with:
+          name: build-linux-x86_64-intermediate
+          path: release/work/build-linux-x86_64/dist-tar/
+
+      # upload-artifact does not preserve permissions
+      - name: Detar
+        run: |
+            cd release/work/build-linux-x86_64
+            tar xf dist-tar/dist.tar.gz
+
+      - name: Package
+        run: release/package_client.sh linux-x86_64 tar.gz
+
+      - name: Upload release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: release/output/
+
+  release:
+    needs:
+      - build-scrcpy-server
+      - package-linux-x86_64
+
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download scrcpy-server
+        uses: actions/download-artifact@v4
+        with:
+          name: scrcpy-server
+          path: release/work/build-server/server/
+
+      - name: Download release-linux-x86_64
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: release/output/
+
+      - name: Package server
+        run: release/package_server.sh
+
+      - name: Generate checksums
+        run: release/generate_checksums.sh
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-release-${{ env.VERSION }}
+          path: release/output
